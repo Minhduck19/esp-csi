@@ -24,9 +24,13 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_now.h"
-#include "esp_csi_gain_ctrl.h"
 
-#define CONFIG_LESS_INTERFERENCE_CHANNEL   11
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#define WIFI_BW_HT20 WIFI_BW20
+#define WIFI_BW_HT40 WIFI_BW40
+#endif
+
+#define CONFIG_LESS_INTERFERENCE_CHANNEL   6
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61 || (CONFIG_IDF_TARGET_ESP32C6 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0))
 #define CONFIG_WIFI_BAND_MODE               WIFI_BAND_MODE_2G_ONLY
 #define CONFIG_WIFI_2G_BANDWIDTHS           WIFI_BW_HT40
@@ -34,23 +38,18 @@
 #define CONFIG_WIFI_2G_PROTOCOL             WIFI_PROTOCOL_11N
 #define CONFIG_WIFI_5G_PROTOCOL             WIFI_PROTOCOL_11N
 #else
+#if CONFIG_IDF_TARGET_ESP32C2
+#define CONFIG_WIFI_BANDWIDTH           WIFI_BW_HT20
+#else
 #define CONFIG_WIFI_BANDWIDTH           WIFI_BW_HT40
+#endif
 #endif
 
 #define CONFIG_ESP_NOW_PHYMODE           WIFI_PHY_MODE_HT40
 #define CONFIG_ESP_NOW_RATE             WIFI_PHY_RATE_MCS0_LGI
-#define CONFIG_FORCE_GAIN                   0
 
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
 #define CSI_FORCE_LLTF                      0
-#endif
-
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61
-#define CONFIG_GAIN_CONTROL                 1
-#endif
-
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
-#define ESP_IF_WIFI_STA ESP_MAC_WIFI_STA
 #endif
 
 static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -67,30 +66,30 @@ static void wifi_init()
 
 #if CONFIG_IDF_TARGET_ESP32C5
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_set_band_mode(CONFIG_WIFI_BAND_MODE);
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(CONFIG_WIFI_BAND_MODE));
     wifi_protocols_t protocols = {
         .ghz_2g = CONFIG_WIFI_2G_PROTOCOL,
         .ghz_5g = CONFIG_WIFI_5G_PROTOCOL
     };
-    ESP_ERROR_CHECK(esp_wifi_set_protocols(ESP_IF_WIFI_STA, &protocols));
+    ESP_ERROR_CHECK(esp_wifi_set_protocols(WIFI_IF_STA, &protocols));
     wifi_bandwidths_t bandwidth = {
         .ghz_2g = CONFIG_WIFI_2G_BANDWIDTHS,
         .ghz_5g = CONFIG_WIFI_5G_BANDWIDTHS
     };
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidths(ESP_IF_WIFI_STA, &bandwidth));
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidth));
 #elif (CONFIG_IDF_TARGET_ESP32C6 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)) || CONFIG_IDF_TARGET_ESP32C61
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_set_band_mode(CONFIG_WIFI_BAND_MODE);
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(CONFIG_WIFI_BAND_MODE));
     wifi_protocols_t protocols = {
         .ghz_2g = CONFIG_WIFI_2G_PROTOCOL,
     };
-    ESP_ERROR_CHECK(esp_wifi_set_protocols(ESP_IF_WIFI_STA, &protocols));
+    ESP_ERROR_CHECK(esp_wifi_set_protocols(WIFI_IF_STA, &protocols));
     wifi_bandwidths_t bandwidth = {
         .ghz_2g = CONFIG_WIFI_2G_BANDWIDTHS,
     };
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidths(ESP_IF_WIFI_STA, &bandwidth));
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidth));
 #else
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(ESP_IF_WIFI_STA, CONFIG_WIFI_BANDWIDTH));
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, CONFIG_WIFI_BANDWIDTH));
     ESP_ERROR_CHECK(esp_wifi_start());
 #endif
 
@@ -109,11 +108,15 @@ static void wifi_init()
         ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_BELOW));
     }
 #else
-    if (CONFIG_WIFI_BANDWIDTH == WIFI_BW_HT20) {
+#if CONFIG_IDF_TARGET_ESP32C2
+    ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_NONE));
+#else
+    if (CONFIG_WIFI_BANDWIDTH != WIFI_BW_HT40) {
         ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_NONE));
     } else {
         ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_BELOW));
     }
+#endif
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_set_mac(WIFI_IF_STA, CONFIG_CSI_SEND_MAC));
@@ -136,8 +139,16 @@ static void wifi_esp_now_init(esp_now_peer_info_t peer)
 
 static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 {
+    (void)ctx;
+
     if (!info || !info->buf) {
         ESP_LOGW(TAG, "<%s> wifi_csi_cb", esp_err_to_name(ESP_ERR_INVALID_ARG));
+        return;
+    }
+
+    if (info->len == 0 || !info->payload || info->payload_len < sizeof(uint32_t) + 15) {
+        ESP_LOGW(TAG, "Invalid CSI packet lengths: csi=%u payload=%u",
+                 info->len, info->payload_len);
         return;
     }
 
@@ -148,26 +159,13 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
     static int s_count = 0;
     float compensate_gain = 1.0f;
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61
     static uint8_t agc_gain = 0;
     static int8_t fft_gain = 0;
-#if CONFIG_GAIN_CONTROL
-    static uint8_t agc_gain_baseline = 0;
-    static int8_t fft_gain_baseline = 0;
-    esp_csi_gain_ctrl_get_rx_gain(rx_ctrl, &agc_gain, &fft_gain);
-    if (s_count < 100) {
-        esp_csi_gain_ctrl_record_rx_gain(agc_gain, fft_gain);
-    } else if (s_count == 100) {
-        esp_csi_gain_ctrl_get_rx_gain_baseline(&agc_gain_baseline, &fft_gain_baseline);
-#if CONFIG_FORCE_GAIN
-        esp_csi_gain_ctrl_set_rx_force_gain(agc_gain_baseline, fft_gain_baseline);
-        ESP_LOGD(TAG, "fft_force %d, agc_force %d", fft_gain_baseline, agc_gain_baseline);
-#endif
-    }
-    esp_csi_gain_ctrl_get_gain_compensation(&compensate_gain, agc_gain, fft_gain);
-    ESP_LOGI(TAG, "compensate_gain %f, agc_gain %d, fft_gain %d", compensate_gain, agc_gain, fft_gain);
 #endif
 
-    uint32_t rx_id = *(uint32_t *)(info->payload + 15);
+    uint32_t rx_id;
+    memcpy(&rx_id, info->payload + 15, sizeof(rx_id));
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61
     if (!s_count) {
         ESP_LOGI(TAG, "================ CSI RECV ================");

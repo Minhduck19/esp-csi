@@ -24,7 +24,12 @@
 #include "esp_netif.h"
 #include "esp_now.h"
 
-#define CONFIG_LESS_INTERFERENCE_CHANNEL   11
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#define WIFI_BW_HT20 WIFI_BW20
+#define WIFI_BW_HT40 WIFI_BW40
+#endif
+
+#define CONFIG_LESS_INTERFERENCE_CHANNEL   6
 
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61 || (CONFIG_IDF_TARGET_ESP32C6 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0))
 #define CONFIG_WIFI_BAND_MODE   WIFI_BAND_MODE_2G_ONLY
@@ -42,6 +47,8 @@
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define ESP_IF_WIFI_STA ESP_MAC_WIFI_STA
+#else
+#define ESP_IF_WIFI_STA WIFI_IF_STA
 #endif
 
 static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -109,7 +116,7 @@ static void wifi_init()
         ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_BELOW));
     }
 #endif
-    ESP_ERROR_CHECK(esp_wifi_set_mac(WIFI_IF_STA, CONFIG_CSI_SEND_MAC));
+    ESP_ERROR_CHECK(esp_wifi_set_mac(ESP_IF_WIFI_STA, CONFIG_CSI_SEND_MAC));
 }
 
 static void wifi_esp_now_init(esp_now_peer_info_t peer)
@@ -149,7 +156,7 @@ void app_main()
      */
     esp_now_peer_info_t peer = {
         .channel   = CONFIG_LESS_INTERFERENCE_CHANNEL,
-        .ifidx     = WIFI_IF_STA,
+        .ifidx     = ESP_IF_WIFI_STA,
         .encrypt   = false,
         .peer_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
     };
